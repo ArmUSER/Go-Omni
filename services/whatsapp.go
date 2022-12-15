@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-ini/ini"
-	"github.com/google/uuid"
 )
 
 var (
@@ -21,7 +20,7 @@ var (
 type WhatsApp struct{}
 
 func (v WhatsApp) Init() {
-	cfg, err := ini.Load("conf.ini")
+	cfg, err := ini.Load("channels_conf.ini")
 	if err != nil {
 		log.Println("Failed to read conf file: ", err)
 	}
@@ -118,12 +117,12 @@ func (v WhatsApp) getMessageStatus(data map[string]interface{}) types.MessageSta
 	return status
 }
 
-func (w WhatsApp) sendMessage(customer types.Contact, messageText string, autoreply bool) {
+func (w WhatsApp) sendMessage(customerID string, messageText string, autoreply bool) {
 
 	urlStr := "https://api.twilio.com/2010-04-01/Accounts/" + WHATSAPP_SID + "/Messages.json"
 
 	v := url.Values{}
-	v.Set("To", "whatsapp:+387"+customer.Number[1:])
+	v.Set("To", "whatsapp:+387"+customerID[1:])
 	v.Set("From", "whatsapp:"+WHATSAPP_NUMBER)
 	v.Set("Body", messageText)
 	rb := *strings.NewReader(v.Encode())
@@ -142,16 +141,4 @@ func (w WhatsApp) sendMessage(customer types.Contact, messageText string, autore
 	//log.Println(string(outputAsBytes))
 
 	defer response.Body.Close()
-}
-
-func (v WhatsApp) findContact(senderUniqueID string) types.Contact {
-	return ContactDirectory.FindContact("number", senderUniqueID)
-}
-
-func (v WhatsApp) createContact(senderUniqueID string, senderName string) types.Contact {
-	contact := types.Contact{}
-	contact.Id = uuid.New().String()
-	contact.Name = senderName
-	contact.Number = senderUniqueID
-	return contact
 }

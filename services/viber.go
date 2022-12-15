@@ -8,7 +8,6 @@ import (
 	"server/types"
 
 	"github.com/go-ini/ini"
-	"github.com/google/uuid"
 )
 
 var VIBER_AUTH_TOKEN string
@@ -16,7 +15,7 @@ var VIBER_AUTH_TOKEN string
 type Viber struct{}
 
 func (v Viber) Init() {
-	cfg, err := ini.Load("conf.ini")
+	cfg, err := ini.Load("channels_conf.ini")
 	if err != nil {
 		log.Println("Failed to read conf file: ", err)
 	}
@@ -46,6 +45,7 @@ func (v Viber) parseReceivedData(body []byte) (string, map[string]interface{}) {
 	var event string
 
 	json.Unmarshal(body, &data)
+
 	event = data["event"].(string)
 
 	if event == "message" {
@@ -86,11 +86,11 @@ func (v Viber) getMessageStatus(data map[string]interface{}) types.MessageStatus
 	return status
 }
 
-func (v Viber) sendMessage(customer types.Contact, messageText string, autoreply bool) {
+func (v Viber) sendMessage(customerID string, messageText string, autoreply bool) {
 
 	postData := make(map[string]interface{})
 
-	postData["receiver"] = customer.ViberId
+	postData["receiver"] = customerID
 	postData["type"] = "text"
 	postData["text"] = messageText
 	postData["min_api_version"] = 1
@@ -118,16 +118,4 @@ func (v Viber) sendMessage(customer types.Contact, messageText string, autoreply
 	}
 
 	defer response.Body.Close()
-}
-
-func (v Viber) findContact(senderUniqueID string) types.Contact {
-	return ContactDirectory.FindContact("viberID", senderUniqueID)
-}
-
-func (v Viber) createContact(senderUniqueID string, senderName string) types.Contact {
-	contact := types.Contact{}
-	contact.Id = uuid.New().String()
-	contact.Name = senderName
-	contact.ViberId = senderUniqueID
-	return contact
 }

@@ -5,27 +5,23 @@ import (
 	"encoding/json"
 	"log"
 	"net"
-	"server/types"
-	"time"
 )
 
 const (
 	CONNECTION_TYPE = "tcp"
-	HOST            = "localhost"
-	PORT            = "8010"
+	TCP_HOST        = "localhost"
+	TCP_PORT        = "8010"
 )
 
 const (
 	CMD_AGENT_LOGIN  = "cmd_agent_login"
 	CMD_AGENT_LOGOFF = "cmd_agent_logoff"
-	CMD_AGENT_PAUSE  = "cmd_agent_pause"
 
 	CMD_ACCEPT_CONVERSATION = "cmd_accept_conversation"
-	CMD_REJECT_CONVERSATION = "cmd_reject_conversation"
 	CMD_FINISH_CONVERSATION = "cmd_finish_conversation"
 
+	CMD_GET_MESSAGES         = "cmd_get_messages"
 	CMD_GET_CUSTOMER_HISTORY = "cmd_get_customer_history"
-	CMD_UPDATE_CONTACT_INFO  = "cmd_update_contact"
 	CMD_SEND_MESSAGE         = "cmd_send_message"
 
 	EVENT_CONVERSATION_STARTED  = "event_conversation_started"
@@ -33,51 +29,46 @@ const (
 	EVENT_CONVERSATION_FINISHED = "event_conversation_finished"
 )
 
-type Call struct {
-	CallId       string
-	CallerName   string
-	CallerNumber string
-	CalleeName   string
-	CalleeNumber string
-	Timestamp    uint
-	Duration     int
-	ContactID    string
+type Agent struct {
+	Id            string
+	Name          string
+	Conversations int
+	socket        net.Conn
 }
 
 var TcpServer TCPServer
 
 type TCPServer struct {
-	Listener net.Listener
+	Listener           net.Listener
+	LoggedAgents       []*Agent
+	loginAuthenticator LoginAuthenticator
 }
 
 func (server *TCPServer) Start() {
 
-	// Listen for incoming connections
+	server.InitializeLoginAuthenticator()
+
 	var err error
-	server.Listener, err = net.Listen(CONNECTION_TYPE, HOST+":"+PORT)
+	server.Listener, err = net.Listen(CONNECTION_TYPE, TCP_HOST+":"+TCP_PORT)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	// Close the Listener when the application closes
-	// A defer statement defers the execution of a function until the surrounding function returns. (defer - odgadja)
-	// The deferred call's arguments are evaluated immediately, but the function call is not executed until the surrounding function returns.
-	// defer Listener.Close() this is moved outside this function , because i want to call this when the main function finishes (application)
-
-	log.Println("Starting TCP Server on " + HOST + ":" + PORT)
+	log.Println("Starting TCP Server on " + TCP_HOST + ":" + TCP_PORT)
 
 	for {
-		//Accept incoming connections
 		conn, err := server.Listener.Accept()
 		if err != nil {
 			log.Fatal(err.Error())
 		}
 
-		// Handle connections in a new gouroutine
-		// Goroutine is something similar to a thread
-		// This is needed to ensure that server can accept more connections (clients)
 		go server.handleClientRequest(conn)
 	}
+}
+
+func (server *TCPServer) Stop() {
+	server.UnInitializeLoginAuthenticator()
+	server.Listener.Close()
 }
 
 func (s *TCPServer) handleClientRequest(con net.Conn) {
@@ -100,182 +91,82 @@ func (s *TCPServer) handleClientRequest(con net.Conn) {
 
 		if action == CMD_AGENT_LOGIN {
 
-			extension := parsedData["ext"].(string)
-			secret := parsedData["secret"].(string)
+			username := parsedData["username"].(string)
+			password := parsedData["password"].(string)
 
-			if agent := Asterisk.GetAgent(extension); agent != nil {
-				if agent.password == secret {
+			agent, failedMsg := s.loginAuthenticator.Login(username, password)
 
-					params := map[string]string{"Queue": "SalesQueue", "Interface": "PJSIP/" + extension}
-
-					success := Asterisk.SendActionToManager("QueueAdd", params)
-
-					parsedData["success"] = success
-
-					if success {
-						agent.socket = con
-
-						parsedData["username"] = agent.Name
-						parsedData["agents"] = Asterisk.Agents
-
-						agent.Status = LoggedIn
-
-						time.AfterFunc(5*time.Second, func() {
-							if !agent.IsBusy() {
-								Omnichannel.sendFirstWaitingConversation(agent.Ext)
-							}
-						})
-					}
-
-				} else {
-					parsedData["success"] = false
-				}
+			if agent != nil && failedMsg == "" {
+				agent.socket = con
+				s.LoggedAgents = append(s.LoggedAgents, agent)
+				parsedData["agent"] = agent
+				parsedData["conversations"] = Omnichannel.GetAgentActiveConversations(agent.Id)
+				parsedData["success"] = 1
 			} else {
-				parsedData["success"] = false
+				parsedData["login_failed_message"] = failedMsg
+				parsedData["success"] = 0
 			}
 
 		} else if action == CMD_AGENT_LOGOFF {
 
-			extension := parsedData["ext"].(string)
+			agentId := parsedData["id"].(string)
+			success := s.loginAuthenticator.Logout(agentId)
 
-			params := map[string]string{"Queue": "SalesQueue", "Interface": "PJSIP/" + extension}
-			success := Asterisk.SendActionToManager("QueueRemove", params)
+			if success {
+				for i := range s.LoggedAgents {
+					if s.LoggedAgents[i].Id == agentId {
+						s.LoggedAgents = append(s.LoggedAgents[:i], s.LoggedAgents[i+1:]...)
+					}
+				}
+			}
 
 			parsedData["success"] = success
 
-			if success {
-				if agent := Asterisk.GetAgent(extension); agent != nil {
-					agent.Status = LoggedOut
-					agent.OnCall = false
-					agent.Paused = false
-					agent.Conversations = 0
-				}
-			}
-		} else if action == CMD_AGENT_PAUSE {
-
-			extension := parsedData["ext"].(string)
-			paused := parsedData["paused"].(bool)
-
-			var pausedString string
-			if paused {
-				pausedString = "true"
-			} else {
-				pausedString = "false"
-			}
-
-			params := map[string]string{"Queue": "SalesQueue", "Interface": "PJSIP/" + extension, "Paused": pausedString}
-			success := Asterisk.SendActionToManager("QueuePause", params)
-
-			parsedData["success"] = success
-
-			if success {
-
-				if agent := Asterisk.GetAgent(extension); agent != nil {
-					agent.Paused = paused
-
-					time.AfterFunc(5*time.Second, func() {
-						if !agent.IsBusy() {
-							Omnichannel.sendFirstWaitingConversation(agent.Ext)
-						}
-					})
-				}
-			}
 		} else if action == CMD_ACCEPT_CONVERSATION {
 
 			conversationId := parsedData["conversationID"].(string)
-			ext := parsedData["ext"].(string)
+			agentId := parsedData["agentID"].(string)
 
-			if conversation := Omnichannel.AcceptConversation(conversationId, ext); conversation != nil {
+			Omnichannel.AcceptConversation(conversationId, agentId)
 
-				if agent := Asterisk.GetAgent(ext); agent != nil {
-					agent.Conversations++
-					log.Println("Agent conversations: ", agent.Conversations)
-				}
-
-				jsonData := make(map[string]interface{})
-				jsonData["event"] = EVENT_CONVERSATION_ACCEPTED
-				jsonData["conversationID"] = conversationId
-				jsonData["ext"] = ext
-
-				s.SendEventToAgents(jsonData, "", false)
-
-				time.AfterFunc(5*time.Second, func() {
-					Omnichannel.sendFirstWaitingConversation("")
-				})
+			if agent := s.GetAgent(agentId); agent != nil {
+				agent.Conversations++
 			}
 
-		} else if action == CMD_REJECT_CONVERSATION {
+			jsonData := make(map[string]interface{})
+			jsonData["event"] = EVENT_CONVERSATION_ACCEPTED
+			jsonData["conversationID"] = conversationId
+			jsonData["agentID"] = agentId
 
-			ext := parsedData["ext"].(string)
-
-			if agent := Asterisk.GetAgent(ext); agent != nil {
-				if !agent.IsBusy() {
-					time.AfterFunc(5*time.Second, func() {
-						Omnichannel.sendFirstWaitingConversation(ext)
-					})
-				}
-			}
+			s.SendEventToAgents(jsonData, "")
 
 		} else if action == CMD_FINISH_CONVERSATION {
 
 			conversationId := parsedData["conversationID"].(string)
-			ext := parsedData["ext"].(string)
+			agentId := parsedData["agentID"].(string)
 
-			if agent := Asterisk.GetAgent(ext); agent != nil {
+			if agent := s.GetAgent(agentId); agent != nil {
 				if agent.Conversations > 0 {
 					agent.Conversations--
-					log.Println("Agent conversations: ", agent.Conversations)
 				}
 			}
 
-			Omnichannel.RemoveConversation(conversationId)
+			Omnichannel.FinishConversation(conversationId)
 
 			jsonData := make(map[string]interface{})
 			jsonData["event"] = EVENT_CONVERSATION_FINISHED
 			jsonData["conversationID"] = conversationId
-			s.SendEventToAgents(jsonData, ext, false)
+			s.SendEventToAgents(jsonData, agentId)
 
-			time.AfterFunc(5*time.Second, func() {
-				Omnichannel.sendFirstWaitingConversation("")
-			})
+		} else if action == CMD_GET_MESSAGES {
 
-		} else if action == CMD_UPDATE_CONTACT_INFO {
+			conversationId := parsedData["conversationID"].(string)
+			parsedData["messages"] = Omnichannel.GetMessages(conversationId)
 
-			contactId := parsedData["contactID"].(string)
-			var name, number string
-
-			if parsedData["name"] != nil {
-				name = parsedData["name"].(string)
-				if name != "" {
-					ContactDirectory.UpdateContact(contactId, "name", name)
-				}
-			}
-
-			if parsedData["number"] != nil {
-				number = parsedData["number"].(string)
-
-				if existContact := ContactDirectory.FindContact("number", number); existContact.Id != "" {
-					CallHistory.UpdateCallContactID(existContact.Id, contactId)
-					ConversationHistory.UpdateConversationContactID(existContact.Id, contactId)
-					ContactDirectory.DeleteContact(existContact.Id)
-				}
-
-				ContactDirectory.UpdateContact(contactId, "number", number)
-			}
 		} else if action == CMD_GET_CUSTOMER_HISTORY {
 
-			contactId := parsedData["contactID"].(string)
-
-			var conversations []*types.Conversation
-			var calls []*Call
-
-			log.Println("Get customer history ", contactId)
-
-			conversations = ConversationHistory.GetConversationsByContactID(contactId)
-			calls = CallHistory.GetCallsByContactID(contactId)
-
-			parsedData["calls"] = calls
-			parsedData["conversations"] = conversations
+			customerID := parsedData["customer_id"].(string)
+			parsedData["conversations"] = Omnichannel.GetCustomerConversations(customerID)
 
 		} else if action == CMD_SEND_MESSAGE {
 
@@ -292,36 +183,37 @@ func (s *TCPServer) handleClientRequest(con net.Conn) {
 	}
 }
 
-func (t *TCPServer) SendEventToAgents(jsonData map[string]interface{}, agentExt string, checkStatus bool) {
+func (s *TCPServer) SendEventToAgents(jsonData map[string]interface{}, agentId string) {
 
 	data, err := json.Marshal(jsonData)
 	if err == nil {
-
-		if agentExt == "" {
-
-			for i := range Asterisk.Agents {
-
-				agent := Asterisk.Agents[i]
-
-				if agent.Status == LoggedIn {
-
-					if checkStatus {
-						if !agent.IsBusy() {
-							agent.socket.Write(data)
-						}
-
-					} else {
-						agent.socket.Write(data)
-					}
-				}
+		if agentId == "" {
+			for i := range s.LoggedAgents {
+				s.LoggedAgents[i].socket.Write(data)
 			}
-
 		} else {
-
-			if agent := Asterisk.GetAgent(agentExt); agent != nil {
+			if agent := s.GetAgent(agentId); agent != nil {
 				agent.socket.Write(data)
 			}
 		}
-
 	}
+}
+
+func (s *TCPServer) GetAgent(id string) *Agent {
+	for i := range s.LoggedAgents {
+		if s.LoggedAgents[i].Id == id {
+			return s.LoggedAgents[i]
+		}
+	}
+
+	return nil
+}
+
+func (s *TCPServer) InitializeLoginAuthenticator() {
+	s.loginAuthenticator = &AsteriskAuthenticator{}
+	s.loginAuthenticator.Init()
+}
+
+func (s *TCPServer) UnInitializeLoginAuthenticator() {
+	s.loginAuthenticator.Disconnect()
 }

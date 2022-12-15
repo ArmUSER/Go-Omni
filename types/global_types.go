@@ -5,16 +5,14 @@ type ChannelType int
 const (
 	Viber ChannelType = iota
 	WhatsApp
-	PhoneCall
 	Unknown
 )
 
 type ConversationState int
 
 const (
-	Default ConversationState = iota
-	InQueue
-	ConnectedToAgent
+	Unassigned ConversationState = iota
+	Assigned
 	Finished
 )
 
@@ -42,18 +40,17 @@ type Message struct {
 	Event         string
 }
 
-type Contact struct {
-	Id      string
-	Number  string
-	Name    string
-	ViberId string
+type Customer struct {
+	Id     string
+	Name   string
+	Number string
 }
 
 type Conversation struct {
 	Id                string
 	Type              ChannelType
 	State             ConversationState
-	Customer          Contact
+	CustomerID        string
 	ConnectedAgent    string
 	Messages          []Message
 	Created_Timestamp uint

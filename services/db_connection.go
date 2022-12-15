@@ -5,12 +5,6 @@ import (
 	"log"
 )
 
-const (
-	DB_PORT     = "3306" //MYSQL default PORT is 3306.
-	DB_USER     = "asterisk"
-	DB_PASSWORD = "Test123!"
-)
-
 var DBConnector DBCONNECTION
 
 type DBCONNECTION struct {
@@ -20,39 +14,37 @@ type DBCONNECTION struct {
 type QueryResult struct {
 	param1 sql.NullString
 	param2 sql.NullString
-	param3 sql.NullString
-	//param4 sql.NullString
 }
 
-func (d *DBCONNECTION) OpenDB(dbName string) {
+func (d *DBCONNECTION) OpenDB(dbCredentials string, dbName string) {
 
 	var error error
-	d.DB, error = sql.Open("mysql", DB_USER+":"+DB_PASSWORD+"@"+CONNECTION_TYPE+"("+SERVER_IP+":"+DB_PORT+")/"+dbName)
+	d.DB, error = sql.Open("mysql", dbCredentials+"/"+dbName)
 	if error != nil {
 		log.Println("Failed to open DB: ", error.Error())
 	}
 }
 
-func (d *DBCONNECTION) ExecuteQuery(dbName string, queryString string) *sql.Rows {
+func (d *DBCONNECTION) ExecuteQuery(dbCredentials string, dbName string, queryString string) *sql.Rows {
 
-	d.OpenDB(dbName)
+	d.OpenDB(dbCredentials, dbName)
+	defer d.DB.Close()
 
 	queryResults, error := d.DB.Query(queryString)
+
 	if error != nil {
 		log.Println("DB Query Error: ", error.Error(), queryString)
 	}
 
-	d.DB.Close()
-
 	return queryResults
 }
 
-func (d *DBCONNECTION) CreateDB(dbName string) {
+func (d *DBCONNECTION) CreateDB(dbCredentials string, dbName string) {
 
 	var err error
 	var db *sql.DB
 
-	if db, err = sql.Open("mysql", DB_USER+":"+DB_PASSWORD+"@"+CONNECTION_TYPE+"("+SERVER_IP+":"+DB_PORT+")/"); err != nil {
+	if db, err = sql.Open("mysql", dbCredentials+"/"); err != nil {
 		log.Println("Error when opening database ", err)
 		return
 	}
@@ -65,9 +57,9 @@ func (d *DBCONNECTION) CreateDB(dbName string) {
 	db.Close()
 }
 
-func (d *DBCONNECTION) CreateTable(dbName string, query string) {
+func (d *DBCONNECTION) CreateTable(dbCredentials string, dbName string, query string) {
 
-	d.OpenDB(dbName)
+	d.OpenDB(dbCredentials, dbName)
 
 	var err error
 	if _, err = d.DB.Exec(query); err != nil {
