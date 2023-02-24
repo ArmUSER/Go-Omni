@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"server/auths"
+	"server/types"
 )
 
 const (
@@ -29,19 +31,12 @@ const (
 	EVENT_CONVERSATION_FINISHED = "event_conversation_finished"
 )
 
-type Agent struct {
-	Id            string
-	Name          string
-	Conversations int
-	socket        net.Conn
-}
-
 var TcpServer TCPServer
 
 type TCPServer struct {
 	Listener           net.Listener
-	LoggedAgents       []*Agent
-	loginAuthenticator LoginAuthenticator
+	LoggedAgents       []*types.Agent
+	loginAuthenticator auths.LoginAuthenticator
 }
 
 func (server *TCPServer) Start() {
@@ -97,7 +92,7 @@ func (s *TCPServer) handleClientRequest(con net.Conn) {
 			agent, failedMsg := s.loginAuthenticator.Login(username, password)
 
 			if agent != nil && failedMsg == "" {
-				agent.socket = con
+				agent.Socket = con
 				s.LoggedAgents = append(s.LoggedAgents, agent)
 				parsedData["agent"] = agent
 				parsedData["conversations"] = Omnichannel.GetAgentActiveConversations(agent.Id)
@@ -189,17 +184,17 @@ func (s *TCPServer) SendEventToAgents(jsonData map[string]interface{}, agentId s
 	if err == nil {
 		if agentId == "" {
 			for i := range s.LoggedAgents {
-				s.LoggedAgents[i].socket.Write(data)
+				s.LoggedAgents[i].Socket.Write(data)
 			}
 		} else {
 			if agent := s.GetAgent(agentId); agent != nil {
-				agent.socket.Write(data)
+				agent.Socket.Write(data)
 			}
 		}
 	}
 }
 
-func (s *TCPServer) GetAgent(id string) *Agent {
+func (s *TCPServer) GetAgent(id string) *types.Agent {
 	for i := range s.LoggedAgents {
 		if s.LoggedAgents[i].Id == id {
 			return s.LoggedAgents[i]
@@ -210,7 +205,7 @@ func (s *TCPServer) GetAgent(id string) *Agent {
 }
 
 func (s *TCPServer) InitializeLoginAuthenticator() {
-	s.loginAuthenticator = &AsteriskAuthenticator{}
+	s.loginAuthenticator = &auths.AsteriskAuthenticator{}
 	s.loginAuthenticator.Init()
 }
 

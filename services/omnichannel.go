@@ -5,6 +5,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"server/channels"
+	"server/db"
 	"server/types"
 	"strconv"
 	"strings"
@@ -16,10 +18,6 @@ import (
 
 const (
 	HTTP_PORT = "8181"
-
-	EVENT_NEW_CONVERSATION       = "EVENT_NEW_CONVERSATION"
-	EVENT_NEW_MESSAGE            = "EVENT_NEW_MESSAGE"
-	EVENT_MESSAGE_STATUS_UPDATED = "EVENT_MESSAGE_STATUS_UPDATED"
 )
 
 var (
@@ -32,7 +30,7 @@ var executionTime float64
 var Omnichannel OmniChannel
 
 type OmniChannel struct {
-	Channels map[types.ChannelType]Channel //map[channelType]channelHandler
+	Channels map[types.ChannelType]channels.Channel //map[channelType]channelHandler
 }
 
 func (o *OmniChannel) Start() {
@@ -42,9 +40,9 @@ func (o *OmniChannel) Start() {
 
 func (o *OmniChannel) Init() {
 
-	cfg, err := ini.Load("db_config.ini")
+	cfg, err := ini.Load("conf/db_conf.ini")
 	if err != nil {
-		log.Println("Failed to read db_config file: ", err)
+		log.Println("Failed to read db_conf file: ", err)
 		return
 	}
 
@@ -57,26 +55,26 @@ func (o *OmniChannel) Init() {
 	OMNI_DB_CREDENTIALS = dbUser + ":" + dbPass + "@" + dbConnType + "(" + dbServerIP + ":" + dbPort + ")"
 	OMNI_DB_NAME = cfg.Section("omni-db").Key("DB_NAME").String()
 
-	DBConnector.CreateDB(OMNI_DB_CREDENTIALS, OMNI_DB_NAME)
+	db.DBConnector.CreateDB(OMNI_DB_CREDENTIALS, OMNI_DB_NAME)
 
 	queryCustomersTable := `CREATE TABLE IF NOT EXISTS customer(id VARCHAR(256) primary key, name TEXT, INDEX index_c1 (name(255)))`
 	queryCustomerContactsTable := `CREATE TABLE IF NOT EXISTS customer_contacts(customer_id VARCHAR(256), channel_type VARCHAR(256), channel_id VARCHAR(256), PRIMARY KEY(channel_type, channel_id), INDEX index_cc1 (customer_id(255), channel_type))`
 	queryConversationsTable := `CREATE TABLE IF NOT EXISTS conversations(id VARCHAR(256) primary key, type INT, customer_id TEXT, connected_agent TEXT, created_timestamp BIGINT, state INT, INDEX index_c1 (customer_id(255), state))`
 	queryMessagesTable := `CREATE TABLE IF NOT EXISTS messages(id INT primary key auto_increment, conversation_id VARCHAR(256), body TEXT, timestamp BIGINT, status INT, sent_from_agent BOOLEAN, type INT, event TEXT, INDEX index_m1 (conversation_id, status, sent_from_agent))`
 
-	DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryCustomersTable)
-	DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryCustomerContactsTable)
-	DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryConversationsTable)
-	DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryMessagesTable)
+	db.DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryCustomersTable)
+	db.DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryCustomerContactsTable)
+	db.DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryConversationsTable)
+	db.DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryMessagesTable)
 
 	o.InitializeChannels()
 }
 
 func (o *OmniChannel) InitializeChannels() {
 
-	o.Channels = make(map[types.ChannelType]Channel)
-	o.Channels[types.Viber] = Viber{}
-	o.Channels[types.WhatsApp] = WhatsApp{}
+	o.Channels = make(map[types.ChannelType]channels.Channel)
+	o.Channels[types.Viber] = channels.Viber{}
+	o.Channels[types.WhatsApp] = channels.WhatsApp{}
 
 	for index, channel := range o.Channels {
 		channel = o.Channels[index]
@@ -111,9 +109,9 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 
 	channel := Omnichannel.Channels[channelType]
 
-	event, data := channel.parseReceivedData(body)
+	event, data := channel.ParseReceivedData(body)
 
-	senderUniqueID, senderName := channel.getSenderInfo(data)
+	senderUniqueID, senderName := channel.GetSenderInfo(data)
 
 	var customerID string
 	if customerID = Omnichannel.FindCustomer(channelType, senderUniqueID); customerID == "" {
@@ -126,9 +124,9 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	if event == EVENT_NEW_MESSAGE {
+	if event == types.EVENT_NEW_MESSAGE {
 
-		messageText, timestamp := channel.getMessageInfo(data)
+		messageText, timestamp := channel.GetMessageInfo(data)
 		message := types.Message{Type: types.Text, Text: messageText, Timestamp: timestamp, Status: types.Sent, SentFromAgent: false}
 
 		var conversation *types.Conversation = nil
@@ -140,7 +138,7 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 			Omnichannel.AddNewMessage(conversation.Id, Omnichannel.createEventMessage(EVENT_CONVERSATION_STARTED, timestamp))
 			Omnichannel.AddNewMessage(conversation.Id, message)
 
-			channel.sendMessage(senderUniqueID, "Thank you for contacting us. One of agents will answer as soon as possible.", true)
+			channel.SendMessage(senderUniqueID, "Thank you for contacting us. One of agents will answer as soon as possible.", true)
 			Omnichannel.SendNewConversationToAgents(*conversation)
 		} else {
 
@@ -154,9 +152,9 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 			TcpServer.SendEventToAgents(jsonData, conversation.ConnectedAgent)
 		}
 
-	} else if event == EVENT_MESSAGE_STATUS_UPDATED {
+	} else if event == types.EVENT_MESSAGE_STATUS_UPDATED {
 
-		status := channel.getMessageStatus(data)
+		status := channel.GetMessageStatus(data)
 
 		if conversation := Omnichannel.FindActiveConversationFromCustomer(customerID); conversation != nil {
 
@@ -200,7 +198,7 @@ func (o *OmniChannel) sendMessage(conversationID string, messageTxt string, auto
 
 		customerUniqueID := o.FindCustomerUniqueIdByChannel(conversation.CustomerID, conversation.Type)
 		channel := o.Channels[conversation.Type]
-		channel.sendMessage(customerUniqueID, messageTxt, autoreply)
+		channel.SendMessage(customerUniqueID, messageTxt, autoreply)
 
 		if !autoreply {
 			message := types.Message{Type: types.Text, Text: messageTxt, Timestamp: uint(time.Now().UnixMilli()), Status: types.Sent, SentFromAgent: true}
@@ -212,7 +210,7 @@ func (o *OmniChannel) sendMessage(conversationID string, messageTxt string, auto
 func (o *OmniChannel) SendNewConversationToAgents(conversation types.Conversation) {
 
 	jsonData := make(map[string]interface{})
-	jsonData["event"] = EVENT_NEW_CONVERSATION
+	jsonData["event"] = types.EVENT_NEW_CONVERSATION
 	jsonData["conversationID"] = conversation.Id
 	jsonData["type"] = conversation.Type
 	jsonData["customer"] = o.FindCustomerByID(conversation.CustomerID)
@@ -237,7 +235,7 @@ func (o *OmniChannel) createEventMessage(event string, timestamp uint) types.Mes
 
 func (o *OmniChannel) FindCustomer(channelType types.ChannelType, channelID string) string {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT customer_id FROM customer_contacts WHERE channel_type="+strconv.Itoa(int(channelType))+" AND channel_id='"+channelID+"'")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT customer_id FROM customer_contacts WHERE channel_type="+strconv.Itoa(int(channelType))+" AND channel_id='"+channelID+"'")
 	defer results.Close()
 
 	if results.Next() {
@@ -252,7 +250,7 @@ func (o *OmniChannel) FindCustomer(channelType types.ChannelType, channelID stri
 
 func (o *OmniChannel) FindCustomerByID(customer_id string) *types.Customer {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT name FROM customer WHERE id='"+customer_id+"'")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT name FROM customer WHERE id='"+customer_id+"'")
 	defer results.Close()
 
 	if results.Next() {
@@ -268,7 +266,7 @@ func (o *OmniChannel) FindCustomerByID(customer_id string) *types.Customer {
 
 func (o *OmniChannel) FindCustomerByName(name string) *types.Customer {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, name FROM customer WHERE name='"+name+"'")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, name FROM customer WHERE name='"+name+"'")
 	defer results.Close()
 
 	if results.Next() {
@@ -283,7 +281,7 @@ func (o *OmniChannel) FindCustomerByName(name string) *types.Customer {
 
 func (o *OmniChannel) FindCustomerUniqueIdByChannel(customerID string, channelType types.ChannelType) string {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT channel_id FROM customer_contacts WHERE customer_id='"+customerID+"' AND channel_type="+strconv.Itoa(int(channelType)))
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT channel_id FROM customer_contacts WHERE customer_id='"+customerID+"' AND channel_type="+strconv.Itoa(int(channelType)))
 	defer results.Close()
 
 	if results.Next() {
@@ -297,21 +295,21 @@ func (o *OmniChannel) FindCustomerUniqueIdByChannel(customerID string, channelTy
 }
 
 func (o *OmniChannel) AddNewCustomer(customer *types.Customer, channelType types.ChannelType, channelID string) {
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer(id, name) VALUES('"+customer.Id+"','"+customer.Name+"')")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer(id, name) VALUES('"+customer.Id+"','"+customer.Name+"')")
 	defer results.Close()
 
-	results2 := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer_contacts(customer_id, channel_type, channel_id) VALUES('"+customer.Id+"',"+strconv.Itoa(int(channelType))+",'"+channelID+"')")
+	results2 := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer_contacts(customer_id, channel_type, channel_id) VALUES('"+customer.Id+"',"+strconv.Itoa(int(channelType))+",'"+channelID+"')")
 	defer results2.Close()
 }
 
 func (o *OmniChannel) AddNewCustomerContact(customer *types.Customer, channelType types.ChannelType, channelID string) {
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer_contacts(customer_id, channel_type, channel_id) VALUES('"+customer.Id+"',"+strconv.Itoa(int(channelType))+",'"+channelID+"')")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer_contacts(customer_id, channel_type, channel_id) VALUES('"+customer.Id+"',"+strconv.Itoa(int(channelType))+",'"+channelID+"')")
 	defer results.Close()
 }
 
 func (o *OmniChannel) FindActiveConversationFromCustomer(customerID string) *types.Conversation {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, connected_agent, created_timestamp, state FROM conversations WHERE customer_id='"+customerID+"' AND state<"+strconv.Itoa(int(types.Finished)))
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, connected_agent, created_timestamp, state FROM conversations WHERE customer_id='"+customerID+"' AND state<"+strconv.Itoa(int(types.Finished)))
 	defer results.Close()
 
 	if results.Next() {
@@ -327,7 +325,7 @@ func (o *OmniChannel) FindActiveConversationFromCustomer(customerID string) *typ
 
 func (o *OmniChannel) FindConversationByID(conversationID string) *types.Conversation {
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT customer_id, type, connected_agent, created_timestamp, state FROM conversations WHERE id='"+conversationID+"'")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT customer_id, type, connected_agent, created_timestamp, state FROM conversations WHERE id='"+conversationID+"'")
 	defer results.Close()
 
 	if results.Next() {
@@ -351,7 +349,7 @@ func (o *OmniChannel) AddNewConversation(conversation *types.Conversation) {
 		strconv.FormatUint(uint64(conversation.Created_Timestamp), 10) + "," +
 		strconv.Itoa(int(conversation.State)) + ")"
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
 	defer results.Close()
 }
 
@@ -365,7 +363,7 @@ func (o *OmniChannel) UpdateConversationState(conversationID string, state types
 		query = "UPDATE conversations SET state=" + strconv.Itoa(int(state)) + ", connectedAgent='" + connectedAgent + "' WHERE id='" + conversationID + "'"
 	}
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
 	defer results.Close()
 }
 
@@ -380,12 +378,12 @@ func (o *OmniChannel) AddNewMessage(conversationID string, message types.Message
 		strconv.Itoa(int(message.Type)) + "," +
 		"'" + message.Event + "')"
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, query)
 	defer results.Close()
 }
 
 func (o *OmniChannel) UpdateMessageStatus(conversationID string, status types.MessageStatus) {
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "UPDATE messages SET status="+strconv.Itoa(int(status))+" WHERE conversation_id='"+conversationID+"' AND status<"+strconv.Itoa(int(status))+" AND sent_from_agent=true")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "UPDATE messages SET status="+strconv.Itoa(int(status))+" WHERE conversation_id='"+conversationID+"' AND status<"+strconv.Itoa(int(status))+" AND sent_from_agent=true")
 	defer results.Close()
 }
 
@@ -393,7 +391,7 @@ func (o *OmniChannel) GetMessages(conversationID string) []*types.Message {
 
 	var messages []*types.Message
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT body, timestamp, status, sent_from_agent, type, event FROM messages WHERE conversation_id='"+conversationID+"'")
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT body, timestamp, status, sent_from_agent, type, event FROM messages WHERE conversation_id='"+conversationID+"'")
 	defer results.Close()
 
 	for results.Next() {
@@ -410,7 +408,7 @@ func (o *OmniChannel) GetCustomerConversations(customerID string) []*types.Conve
 
 	var conversations []*types.Conversation
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp FROM conversations WHERE customer_id='"+customerID+"' AND state="+strconv.Itoa(int(types.Finished)))
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp FROM conversations WHERE customer_id='"+customerID+"' AND state="+strconv.Itoa(int(types.Finished)))
 	defer results.Close()
 
 	for results.Next() {
@@ -427,7 +425,7 @@ func (o *OmniChannel) GetAgentActiveConversations(agent string) []*types.Convers
 
 	var conversations []*types.Conversation
 
-	results := DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp, state FROM conversations WHERE connected_agent='"+agent+"' AND state<"+strconv.Itoa(int(types.Finished)))
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp, state FROM conversations WHERE connected_agent='"+agent+"' AND state<"+strconv.Itoa(int(types.Finished)))
 	defer results.Close()
 
 	for results.Next() {
