@@ -26,11 +26,15 @@ var (
 )
 
 var executionTime float64
+var numOfReq int
+var startTime time.Time
 
 var Omnichannel OmniChannel
 
 type OmniChannel struct {
-	Channels map[types.ChannelType]channels.Channel //map[channelType]channelHandler
+	Channels            map[types.ChannelType]channels.Channel //map[channelType]channelHandler
+	Customers           []*types.Customer
+	ActiveConversations []*types.Conversation
 }
 
 func (o *OmniChannel) Start() {
@@ -68,6 +72,9 @@ func (o *OmniChannel) Init() {
 	db.DBConnector.CreateTable(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, queryMessagesTable)
 
 	o.InitializeChannels()
+
+	o.Customers = o.GetCustomers()
+	o.ActiveConversations = o.GetAllActiveConversations()
 }
 
 func (o *OmniChannel) InitializeChannels() {
@@ -83,10 +90,10 @@ func (o *OmniChannel) InitializeChannels() {
 }
 
 func startHttpServer() {
+	numOfReq = 0
+	http.HandleFunc("/", HandleRequests)
 
 	log.Println("Starting HTTP Server at PORT " + HTTP_PORT)
-
-	http.HandleFunc("/", HandleRequests)
 
 	if err := http.ListenAndServe(":"+HTTP_PORT, nil); err != nil {
 		log.Fatal("HTTP Server error:", err)
@@ -100,7 +107,12 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 		panic(err)
 	}
 
-	defer MeasureExecutionTime()()
+	if numOfReq == 0 {
+		startTime = time.Now()
+	}
+	numOfReq++
+
+	//defer MeasureExecutionTime()()
 
 	channelType := Omnichannel.getChannelType(req.URL.String())
 	if channelType == types.Unknown {
@@ -108,9 +120,7 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 	}
 
 	channel := Omnichannel.Channels[channelType]
-
 	event, data := channel.ParseReceivedData(body)
-
 	senderUniqueID, senderName := channel.GetSenderInfo(data)
 
 	var customerID string
@@ -133,15 +143,12 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 		if conversation = Omnichannel.FindActiveConversationFromCustomer(customerID); conversation == nil {
 
 			conversation = &types.Conversation{Id: uuid.New().String(), Type: channelType, State: types.Unassigned, CustomerID: customerID, Created_Timestamp: timestamp}
-
 			Omnichannel.AddNewConversation(conversation)
 			Omnichannel.AddNewMessage(conversation.Id, Omnichannel.createEventMessage(EVENT_CONVERSATION_STARTED, timestamp))
 			Omnichannel.AddNewMessage(conversation.Id, message)
-
 			channel.SendMessage(senderUniqueID, "Thank you for contacting us. One of agents will answer as soon as possible.", true)
 			Omnichannel.SendNewConversationToAgents(*conversation)
 		} else {
-
 			Omnichannel.AddNewMessage(conversation.Id, message)
 
 			jsonData := make(map[string]interface{})
@@ -166,6 +173,11 @@ func HandleRequests(w http.ResponseWriter, req *http.Request) {
 			jsonData["status"] = status
 			TcpServer.SendEventToAgents(jsonData, "")
 		}
+	}
+
+	if numOfReq == 100 {
+		fmt.Println("All Messages executed for ", time.Since(startTime).Seconds())
+		numOfReq = 0
 	}
 }
 
@@ -235,13 +247,13 @@ func (o *OmniChannel) createEventMessage(event string, timestamp uint) types.Mes
 
 func (o *OmniChannel) FindCustomer(channelType types.ChannelType, channelID string) string {
 
-	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT customer_id FROM customer_contacts WHERE channel_type="+strconv.Itoa(int(channelType))+" AND channel_id='"+channelID+"'")
-	defer results.Close()
+	for i := range o.Customers {
+		customerContacts := o.Customers[i].Contacts
 
-	if results.Next() {
-		var customer_id string
-		if err := results.Scan(&customer_id); err == nil {
-			return customer_id
+		for j := range customerContacts {
+			if customerContacts[j].Channel_Type == channelType && customerContacts[j].Channel_Id == channelID {
+				return o.Customers[i].Id
+			}
 		}
 	}
 
@@ -250,14 +262,9 @@ func (o *OmniChannel) FindCustomer(channelType types.ChannelType, channelID stri
 
 func (o *OmniChannel) FindCustomerByID(customer_id string) *types.Customer {
 
-	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT name FROM customer WHERE id='"+customer_id+"'")
-	defer results.Close()
-
-	if results.Next() {
-		contact := types.Customer{}
-		contact.Id = customer_id
-		if err := results.Scan(&contact.Name); err == nil {
-			return &contact
+	for i := range o.Customers {
+		if o.Customers[i].Id == customer_id {
+			return o.Customers[i]
 		}
 	}
 
@@ -266,13 +273,9 @@ func (o *OmniChannel) FindCustomerByID(customer_id string) *types.Customer {
 
 func (o *OmniChannel) FindCustomerByName(name string) *types.Customer {
 
-	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, name FROM customer WHERE name='"+name+"'")
-	defer results.Close()
-
-	if results.Next() {
-		contact := types.Customer{}
-		if err := results.Scan(&contact.Id, &contact.Name); err == nil {
-			return &contact
+	for i := range o.Customers {
+		if o.Customers[i].Name == name {
+			return o.Customers[i]
 		}
 	}
 
@@ -281,13 +284,14 @@ func (o *OmniChannel) FindCustomerByName(name string) *types.Customer {
 
 func (o *OmniChannel) FindCustomerUniqueIdByChannel(customerID string, channelType types.ChannelType) string {
 
-	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT channel_id FROM customer_contacts WHERE customer_id='"+customerID+"' AND channel_type="+strconv.Itoa(int(channelType)))
-	defer results.Close()
-
-	if results.Next() {
-		var channelID string
-		if err := results.Scan(&channelID); err == nil {
-			return channelID
+	for i := range o.Customers {
+		if o.Customers[i].Id == customerID {
+			customerContacts := o.Customers[i].Contacts
+			for j := range customerContacts {
+				if customerContacts[j].Channel_Type == channelType {
+					return customerContacts[j].Channel_Id
+				}
+			}
 		}
 	}
 
@@ -295,6 +299,10 @@ func (o *OmniChannel) FindCustomerUniqueIdByChannel(customerID string, channelTy
 }
 
 func (o *OmniChannel) AddNewCustomer(customer *types.Customer, channelType types.ChannelType, channelID string) {
+	customerContact := types.CustomerContact{Channel_Type: channelType, Channel_Id: channelID}
+	customer.Contacts = append(customer.Contacts, customerContact)
+	o.Customers = append(o.Customers, customer)
+
 	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer(id, name) VALUES('"+customer.Id+"','"+customer.Name+"')")
 	defer results.Close()
 
@@ -303,24 +311,23 @@ func (o *OmniChannel) AddNewCustomer(customer *types.Customer, channelType types
 }
 
 func (o *OmniChannel) AddNewCustomerContact(customer *types.Customer, channelType types.ChannelType, channelID string) {
+	customerContact := types.CustomerContact{Channel_Type: channelType, Channel_Id: channelID}
+	customer.Contacts = append(customer.Contacts, customerContact)
+
 	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "INSERT INTO customer_contacts(customer_id, channel_type, channel_id) VALUES('"+customer.Id+"',"+strconv.Itoa(int(channelType))+",'"+channelID+"')")
 	defer results.Close()
 }
 
 func (o *OmniChannel) FindActiveConversationFromCustomer(customerID string) *types.Conversation {
 
-	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, connected_agent, created_timestamp, state FROM conversations WHERE customer_id='"+customerID+"' AND state<"+strconv.Itoa(int(types.Finished)))
-	defer results.Close()
-
-	if results.Next() {
-		conversation := types.Conversation{}
-		conversation.CustomerID = customerID
-		if err := results.Scan(&conversation.Id, &conversation.Type, &conversation.ConnectedAgent, &conversation.Created_Timestamp, &conversation.State); err == nil {
-			return &conversation
+	for i := range o.ActiveConversations {
+		if o.ActiveConversations[i].CustomerID == customerID {
+			return o.ActiveConversations[i]
 		}
 	}
 
 	return nil
+
 }
 
 func (o *OmniChannel) FindConversationByID(conversationID string) *types.Conversation {
@@ -340,6 +347,8 @@ func (o *OmniChannel) FindConversationByID(conversationID string) *types.Convers
 }
 
 func (o *OmniChannel) AddNewConversation(conversation *types.Conversation) {
+
+	o.ActiveConversations = append(o.ActiveConversations, conversation)
 
 	query := "INSERT INTO conversations(id, type, customer_id, connected_agent, created_timestamp, state) VALUES('" +
 		conversation.Id + "'," +
@@ -404,6 +413,33 @@ func (o *OmniChannel) GetMessages(conversationID string) []*types.Message {
 	return messages
 }
 
+func (o *OmniChannel) GetCustomers() []*types.Customer {
+
+	var customers []*types.Customer
+
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT * FROM customer")
+	defer results.Close()
+
+	for results.Next() {
+		var customer types.Customer
+		if err := results.Scan(&customer.Id, &customer.Name); err == nil {
+			customers = append(customers, &customer)
+
+			results2 := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT channel_type, channel_id FROM customer_contacts WHERE customer_id='"+customer.Id+"'")
+			defer results2.Close()
+
+			for results2.Next() {
+				var customerContact types.CustomerContact
+				if err := results2.Scan(&customerContact.Channel_Type, &customerContact.Channel_Id); err == nil {
+					customer.Contacts = append(customer.Contacts, customerContact)
+				}
+			}
+		}
+	}
+
+	return customers
+}
+
 func (o *OmniChannel) GetCustomerConversations(customerID string) []*types.Conversation {
 
 	var conversations []*types.Conversation
@@ -426,6 +462,23 @@ func (o *OmniChannel) GetAgentActiveConversations(agent string) []*types.Convers
 	var conversations []*types.Conversation
 
 	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp, state FROM conversations WHERE connected_agent='"+agent+"' AND state<"+strconv.Itoa(int(types.Finished)))
+	defer results.Close()
+
+	for results.Next() {
+		var conversation types.Conversation
+		if err := results.Scan(&conversation.Id, &conversation.Type, &conversation.CustomerID, &conversation.ConnectedAgent, &conversation.Created_Timestamp, &conversation.State); err == nil {
+			conversations = append(conversations, &conversation)
+		}
+	}
+
+	return conversations
+}
+
+func (o *OmniChannel) GetAllActiveConversations() []*types.Conversation {
+
+	var conversations []*types.Conversation
+
+	results := db.DBConnector.ExecuteQuery(OMNI_DB_CREDENTIALS, OMNI_DB_NAME, "SELECT id, type, customer_id, connected_agent, created_timestamp, state FROM conversations WHERE state<"+strconv.Itoa(int(types.Finished)))
 	defer results.Close()
 
 	for results.Next() {

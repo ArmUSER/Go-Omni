@@ -43,8 +43,9 @@ type Message struct {
 }
 
 type Customer struct {
-	Id   string
-	Name string
+	Id       string
+	Name     string
+	Contacts []CustomerContact
 }
 
 type Conversation struct {
@@ -62,4 +63,9 @@ type Agent struct {
 	Name          string
 	Conversations int
 	Socket        net.Conn
+}
+
+type CustomerContact struct {
+	Channel_Type ChannelType
+	Channel_Id   string
 }
